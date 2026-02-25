@@ -105,6 +105,13 @@ export class EmbyClient {
   }
 
   private async ensureAuthenticated(): Promise<void> {
+    // 如果有 ApiKey 但没有 userId，需要获取用户 ID
+    if (this.apiKey && !this.userId) {
+      const user = await this.getCurrentUser();
+      this.userId = user.Id;
+      return;
+    }
+
     // 如果有 ApiKey，不需要认证
     if (this.apiKey) return;
 
@@ -136,18 +143,13 @@ export class EmbyClient {
   async authenticate(username: string, password: string): Promise<{ AccessToken: string; User: { Id: string } }> {
     const url = `${this.serverUrl}/Users/AuthenticateByName`;
 
-    const params = new URLSearchParams({
-      Username: username,
-      Pw: password,
-    });
-
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': 'application/json',
         'X-Emby-Authorization': 'MediaBrowser Client="LunaTV", Device="Web", DeviceId="lunatv-web", Version="1.0.0"',
       },
-      body: params.toString(),
+      body: JSON.stringify({ Username: username, Pw: password }),
     });
 
     if (!response.ok) {
