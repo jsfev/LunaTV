@@ -60,7 +60,16 @@ export default function VirtualGrid<T>({
 
   const virtualizer = useVirtualizer({
     count: rowCount,
-    getScrollElement: () => document.body,
+    getScrollElement: () => {
+      // On mobile browsers (iOS Safari, Android), scrolling happens on documentElement, not body
+      // Check which element actually has scrollTop > 0 when page is scrolled
+      if (typeof window !== 'undefined') {
+        return document.documentElement.scrollTop > 0 || document.documentElement.scrollHeight > document.documentElement.clientHeight
+          ? document.documentElement
+          : document.body;
+      }
+      return document.body;
+    },
     estimateSize: () => estimateRowHeight,
     overscan,
   });
