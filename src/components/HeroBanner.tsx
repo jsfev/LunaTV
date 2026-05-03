@@ -58,13 +58,35 @@ function HeroBanner({
   const refreshTrailerMutation = useRefreshTrailerUrlMutation();
   const clearTrailerMutation = useClearTrailerUrlMutation();
 
-  // 重置越界的 currentIndex
+  // 重置越界的 currentIndex - 立即同步重置，避免渲染崩溃
   useEffect(() => {
     if (items.length > 0 && currentIndex >= items.length) {
       console.warn('[HeroBanner] currentIndex out of bounds, resetting to 0');
       setCurrentIndex(0);
+      setVideoLoaded(false); // 重置视频加载状态
     }
   }, [items.length, currentIndex]);
+
+  // 监听items变化，立即重置状态
+  useEffect(() => {
+    if (items.length === 0) {
+      setCurrentIndex(0);
+      setVideoLoaded(false);
+      setIsTransitioning(false);
+    }
+
+    // 当items变化时，停止当前视频播放，避免引用过期的item
+    if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+        videoRef.current.src = '';
+        videoRef.current.load();
+      } catch (error) {
+        console.warn('[HeroBanner] 清理视频失败:', error);
+      }
+    }
+    setVideoLoaded(false);
+  }, [items]);
 
   // 处理图片 URL，使用代理绕过防盗链
   const getProxiedImageUrl = (url: string) => {
@@ -320,7 +342,7 @@ function HeroBanner({
               />
 
               {/* 视频背景（如果启用且有预告片URL，加载完成后淡入） */}
-              {enableVideo && getEffectiveTrailerUrl(item) && index === currentIndex && (
+              {enableVideo && getEffectiveTrailerUrl(item) && index === currentIndex && index === safeIndex && (
                 <video
                   ref={videoRef}
                   className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-1000 ${
@@ -342,7 +364,7 @@ function HeroBanner({
                     });
 
                     // 检测是否是403错误（trailer URL过期）
-                    if (item.douban_id) {
+                    if (item.douban_id && isMountedRef.current) {
                       try {
                         // 如果缓存中有URL，说明之前刷新过，但现在又失败了
                         // 需要清除缓存中的旧URL，重新刷新
@@ -353,7 +375,7 @@ function HeroBanner({
                         // 重新刷新URL
                         const newUrl = await refreshTrailerUrl(item.douban_id);
                         // 再次检查组件是否仍然挂载，避免在卸载后操作 video 元素
-                        if (newUrl && isMountedRef.current) {
+                        if (newUrl && isMountedRef.current && video && !video.error) {
                           // 重新加载视频
                           video.load();
                         }
@@ -465,7 +487,7 @@ function HeroBanner({
       </div>
 
       {/* 音量控制按钮（仅视频模式） - 底部右下角，避免遮挡简介 */}
-      {enableVideo && getEffectiveTrailerUrl(currentItem) && (
+      {enableVideo && currentItem && getEffectiveTrailerUrl(currentItem) && (
         <button
           onClick={toggleMute}
           className="absolute bottom-6 sm:bottom-8 right-4 sm:right-8 md:right-12 lg:right-16 w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-black/50 backdrop-blur-sm text-white flex items-center justify-center hover:bg-black/70 transition-all border border-white/50 z-10"
