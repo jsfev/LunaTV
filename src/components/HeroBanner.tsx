@@ -51,6 +51,7 @@ function HeroBanner({
   const videoRef = useRef<HTMLVideoElement>(null);
   const isMountedRef = useRef(true);
   const transitionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const videoErrorRetryCount = useRef<Record<string, number>>({});
 
   // 🚀 TanStack Query - 刷新后的trailer URL缓存
   // 替换 useState + localStorage 手动管理
@@ -58,13 +59,35 @@ function HeroBanner({
   const refreshTrailerMutation = useRefreshTrailerUrlMutation();
   const clearTrailerMutation = useClearTrailerUrlMutation();
 
-  // 重置越界的 currentIndex
+  // 重置越界的 currentIndex - 立即同步重置，避免渲染崩溃
   useEffect(() => {
     if (items.length > 0 && currentIndex >= items.length) {
       console.warn('[HeroBanner] currentIndex out of bounds, resetting to 0');
       setCurrentIndex(0);
+      setVideoLoaded(false); // 重置视频加载状态
     }
   }, [items.length, currentIndex]);
+
+  // 监听items变化，立即重置状态
+  useEffect(() => {
+    if (items.length === 0) {
+      setCurrentIndex(0);
+      setVideoLoaded(false);
+      setIsTransitioning(false);
+    }
+
+    // 当items变化时，停止当前视频播放，避免引用过期的item
+    if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+        videoRef.current.src = '';
+        videoRef.current.load();
+      } catch (error) {
+        console.warn('[HeroBanner] 清理视频失败:', error);
+      }
+    }
+    setVideoLoaded(false);
+  }, [items]);
 
   // 处理图片 URL，使用代理绕过防盗链
   const getProxiedImageUrl = (url: string) => {
@@ -232,44 +255,44 @@ function HeroBanner({
     enableVideo,
   });
 
-  // 🎯 检查并刷新缺失的 trailer URL（组件挂载时）
+  // 🎯 检查并刷新缺失的 trailer URL（仅当前显示的item）
   useEffect(() => {
     // 如果禁用了视频，不需要刷新 trailer
-    if (!enableVideo) {
+    if (!enableVideo || items.length === 0) {
       return;
     }
 
-    const checkAndRefreshMissingTrailers = async () => {
-      for (const item of items) {
-        // 检查组件是否仍然挂载
-        if (!isMountedRef.current) break;
+    const currentItem = items[currentIndex];
+    if (!currentItem) return;
 
-        // 如果有 douban_id 但没有 trailerUrl，尝试获取
-        if (item.douban_id && !item.trailerUrl && !refreshedTrailerUrls[item.douban_id]) {
-          console.log('[HeroBanner] 检测到缺失的 trailer，尝试获取:', item.title);
-          try {
-            await refreshTrailerUrl(item.douban_id);
-            // 再次检查组件是否仍然挂载
-            if (!isMountedRef.current) break;
-          } catch (error) {
-            // 忽略错误，继续处理下一个
-            console.warn('[HeroBanner] 获取 trailer 失败:', error);
-          }
+    // 只处理当前显示的item，避免批量请求导致崩溃
+    const checkCurrentItemTrailer = async () => {
+      // 检查组件是否仍然挂载
+      if (!isMountedRef.current) return;
+
+      // 如果有 douban_id 但没有 trailerUrl，尝试获取
+      if (currentItem.douban_id && !currentItem.trailerUrl && !refreshedTrailerUrls[currentItem.douban_id]) {
+        console.log('[HeroBanner] 当前item缺失trailer，尝试获取:', currentItem.title);
+        try {
+          await refreshTrailerUrl(currentItem.douban_id);
+        } catch (error) {
+          // 静默处理错误
+          console.warn('[HeroBanner] 获取当前item的trailer失败:', error);
         }
       }
     };
 
-    // 延迟执行，避免阻塞初始渲染
+    // 延迟执行，避免阻塞渲染
     const timer = setTimeout(() => {
       if (isMountedRef.current) {
-        checkAndRefreshMissingTrailers();
+        checkCurrentItemTrailer();
       }
-    }, 1000);
+    }, 1500);
 
     return () => {
       clearTimeout(timer);
     };
-  }, [items, refreshedTrailerUrls, refreshTrailerUrl, enableVideo]);
+  }, [currentIndex, items, refreshedTrailerUrls, refreshTrailerUrl, enableVideo]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -279,6 +302,8 @@ function HeroBanner({
       if (transitionTimeoutRef.current) {
         clearTimeout(transitionTimeoutRef.current);
       }
+      // 清理重试计数
+      videoErrorRetryCount.current = {};
     };
   }, []);
 
@@ -320,7 +345,7 @@ function HeroBanner({
               />
 
               {/* 视频背景（如果启用且有预告片URL，加载完成后淡入） */}
-              {enableVideo && getEffectiveTrailerUrl(item) && index === currentIndex && (
+              {enableVideo && getEffectiveTrailerUrl(item) && index === currentIndex && index === safeIndex && (
                 <video
                   ref={videoRef}
                   className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-1000 ${
@@ -335,15 +360,27 @@ function HeroBanner({
                     if (!isMountedRef.current) return;
 
                     const video = e.currentTarget;
+                    const itemKey = `${item.douban_id || item.id}`;
+
                     console.error('[HeroBanner] 视频加载失败:', {
                       title: item.title,
                       trailerUrl: item.trailerUrl,
                       error: e,
                     });
 
+                    // 防止无限重试：每个视频最多重试1次
+                    const retryCount = videoErrorRetryCount.current[itemKey] || 0;
+                    if (retryCount >= 1) {
+                      console.warn('[HeroBanner] 视频已重试过，不再尝试，显示背景图片');
+                      return;
+                    }
+
                     // 检测是否是403错误（trailer URL过期）
-                    if (item.douban_id) {
+                    if (item.douban_id && isMountedRef.current) {
                       try {
+                        // 记录重试次数
+                        videoErrorRetryCount.current[itemKey] = retryCount + 1;
+
                         // 如果缓存中有URL，说明之前刷新过，但现在又失败了
                         // 需要清除缓存中的旧URL，重新刷新
                         if (refreshedTrailerUrls[item.douban_id]) {
@@ -353,7 +390,7 @@ function HeroBanner({
                         // 重新刷新URL
                         const newUrl = await refreshTrailerUrl(item.douban_id);
                         // 再次检查组件是否仍然挂载，避免在卸载后操作 video 元素
-                        if (newUrl && isMountedRef.current) {
+                        if (newUrl && isMountedRef.current && video && !video.error) {
                           // 重新加载视频
                           video.load();
                         }
@@ -465,7 +502,7 @@ function HeroBanner({
       </div>
 
       {/* 音量控制按钮（仅视频模式） - 底部右下角，避免遮挡简介 */}
-      {enableVideo && getEffectiveTrailerUrl(currentItem) && (
+      {enableVideo && currentItem && getEffectiveTrailerUrl(currentItem) && (
         <button
           onClick={toggleMute}
           className="absolute bottom-6 sm:bottom-8 right-4 sm:right-8 md:right-12 lg:right-16 w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-black/50 backdrop-blur-sm text-white flex items-center justify-center hover:bg-black/70 transition-all border border-white/50 z-10"
