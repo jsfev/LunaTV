@@ -58,6 +58,14 @@ function HeroBanner({
   const refreshTrailerMutation = useRefreshTrailerUrlMutation();
   const clearTrailerMutation = useClearTrailerUrlMutation();
 
+  // 重置越界的 currentIndex
+  useEffect(() => {
+    if (items.length > 0 && currentIndex >= items.length) {
+      console.warn('[HeroBanner] currentIndex out of bounds, resetting to 0');
+      setCurrentIndex(0);
+    }
+  }, [items.length, currentIndex]);
+
   // 处理图片 URL，使用代理绕过防盗链
   const getProxiedImageUrl = (url: string) => {
     if (url?.includes('douban') || url?.includes('doubanio')) {
@@ -203,7 +211,16 @@ function HeroBanner({
     return null;
   }
 
-  const currentItem = items[currentIndex];
+  // 确保 currentIndex 在有效范围内
+  const safeIndex = Math.min(currentIndex, items.length - 1);
+  const currentItem = items[safeIndex];
+
+  // 防御性检查：如果 currentItem 仍然是 undefined，返回 null
+  if (!currentItem) {
+    console.error('[HeroBanner] currentItem is undefined, items:', items, 'currentIndex:', currentIndex);
+    return null;
+  }
+
   const backgroundImage = getHDBackdrop(currentItem.backdrop) || currentItem.poster;
 
   // 🔍 调试日志
@@ -222,18 +239,18 @@ function HeroBanner({
       return;
     }
 
-    let isMounted = true;
-
     const checkAndRefreshMissingTrailers = async () => {
       for (const item of items) {
         // 检查组件是否仍然挂载
-        if (!isMounted) break;
+        if (!isMountedRef.current) break;
 
         // 如果有 douban_id 但没有 trailerUrl，尝试获取
         if (item.douban_id && !item.trailerUrl && !refreshedTrailerUrls[item.douban_id]) {
           console.log('[HeroBanner] 检测到缺失的 trailer，尝试获取:', item.title);
           try {
             await refreshTrailerUrl(item.douban_id);
+            // 再次检查组件是否仍然挂载
+            if (!isMountedRef.current) break;
           } catch (error) {
             // 忽略错误，继续处理下一个
             console.warn('[HeroBanner] 获取 trailer 失败:', error);
@@ -244,13 +261,12 @@ function HeroBanner({
 
     // 延迟执行，避免阻塞初始渲染
     const timer = setTimeout(() => {
-      if (isMounted) {
+      if (isMountedRef.current) {
         checkAndRefreshMissingTrailers();
       }
     }, 1000);
 
     return () => {
-      isMounted = false;
       clearTimeout(timer);
     };
   }, [items, refreshedTrailerUrls, refreshTrailerUrl, enableVideo]);
@@ -336,13 +352,16 @@ function HeroBanner({
 
                         // 重新刷新URL
                         const newUrl = await refreshTrailerUrl(item.douban_id);
+                        // 再次检查组件是否仍然挂载，避免在卸载后操作 video 元素
                         if (newUrl && isMountedRef.current) {
                           // 重新加载视频
                           video.load();
                         }
                       } catch (error) {
                         // 静默处理错误，避免页面崩溃
-                        console.warn('[HeroBanner] 刷新trailer URL失败，将继续显示背景图片:', error);
+                        if (isMountedRef.current) {
+                          console.warn('[HeroBanner] 刷新trailer URL失败，将继续显示背景图片:', error);
+                        }
                       }
                     }
                   }}
